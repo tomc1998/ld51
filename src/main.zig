@@ -13,6 +13,13 @@ pub const Renderer = struct {
     white_fbo: C.RenderTexture2D,
     /// Render 'black' blocks to this fbo. 2x2 blocks make up a Tile
     black_fbo: C.RenderTexture2D,
+    /// Render 'white' blocks to this fbo. 2x2 blocks make up a Tile
+    white_fbo_rounded: C.RenderTexture2D,
+    /// Render 'black' blocks to this fbo. 2x2 blocks make up a Tile
+    black_fbo_rounded: C.RenderTexture2D,
+    score_square_blur_fbos: [2]C.RenderTexture2D,
+    /// Shader to 'round' the shapes in the black/white FBOs in a pixelart style.
+    round_shader: C.Shader,
     /// How much to scale up FBOs after compositing
     scale: u32,
     /// Should be globals.screen_w / scale
@@ -20,6 +27,9 @@ pub const Renderer = struct {
     /// Should be globals.screen_h / scale
     fbo_h: u32,
     camera: C.Camera2D,
+    white_color: C.Color = C.WHITE,
+    black_color: C.Color = C.GREEN,
+    score_color: C.Color = .{ .r = 254, .g = 191, .b = 148, .a = 255 },
 
     pub fn init(alloc: std.mem.Allocator) @This() {
         const scale: u32 = 4;
@@ -33,8 +43,14 @@ pub const Renderer = struct {
                 .rotation = 0.0,
                 .zoom = 4.0,
             },
+            .round_shader = C.LoadShader(
+                null,
+                "assets/shaders/round_frag.glsl",
+            ),
             .white_fbo = C.LoadRenderTexture(@intCast(c_int, fbo_w), @intCast(c_int, fbo_h)),
             .black_fbo = C.LoadRenderTexture(@intCast(c_int, fbo_w), @intCast(c_int, fbo_h)),
+            .white_fbo_rounded = C.LoadRenderTexture(@intCast(c_int, fbo_w), @intCast(c_int, fbo_h)),
+            .black_fbo_rounded = C.LoadRenderTexture(@intCast(c_int, fbo_w), @intCast(c_int, fbo_h)),
             .scale = scale,
             .fbo_w = fbo_w,
             .fbo_h = fbo_h,
@@ -42,7 +58,7 @@ pub const Renderer = struct {
     }
 
     /// mouse_tile_pos: indexes into board
-    pub fn render(self: *@This(), board: *Board, mouse_tile_pos: la.Vec2f) void {
+    pub fn render(self: *@This(), board: Board, mouse_tile_pos: la.Vec2f) void {
 
         // Given the camera target/offset, figure out which tiles we
         // want to draw from the board (since we don't just want to draw
@@ -56,9 +72,7 @@ pub const Renderer = struct {
         const board_tl = board_size.mul(-0.5);
         // Now figure out the camera top left & size too
         // We're assuming the camera offset here... maybe fix this
-        // TODO zoom
-        //std.debug.assert(self.camera.zoom == 1.0);
-        const camera_size = la.Vec2f.fromRaylib(self.camera.offset).mul(2.0);
+        const camera_size = la.Vec2f.fromRaylib(self.camera.offset).mul(2.0).mul(1.0 / self.camera.zoom);
         const camera_tl = camera_size.mul(-0.5).add(la.Vec2f.fromRaylib(self.camera.target));
         // Now use these two positions to compute the index of the top left most tile that must be rendered
         const top_left_tile_pos = camera_tl.sub(board_tl).mul(1.0 / g.tile_size).floor();
@@ -132,43 +146,79 @@ pub const Renderer = struct {
             C.EndTextureMode();
         }
 
-        // Draw the final fbo
+        // Round each fbo
+        const FboPipe = struct {
+            in: C.RenderTexture,
+            out: C.RenderTexture,
+        };
+        for ([_]FboPipe{
+            .{ .in = self.white_fbo, .out = self.white_fbo_rounded },
+            .{ .in = self.black_fbo, .out = self.black_fbo_rounded },
+        }) |fbo_pipe| {
+            C.BeginTextureMode(fbo_pipe.out);
+            C.BeginShaderMode(self.round_shader);
+            C.ClearBackground(.{ .r = 0, .g = 0, .b = 0, .a = 0 });
+            C.DrawTexturePro(
+                fbo_pipe.in.texture,
+                .{
+                    .x = 0,
+                    .y = @intToFloat(f32, fbo_pipe.in.texture.height),
+                    .width = @intToFloat(f32, fbo_pipe.in.texture.width),
+                    .height = -@intToFloat(f32, fbo_pipe.in.texture.height),
+                },
+                .{
+                    .x = 0,
+                    .y = 0,
+                    .width = @intToFloat(f32, fbo_pipe.out.texture.width),
+                    .height = @intToFloat(f32, fbo_pipe.out.texture.height),
+                },
+                .{ .x = 0, .y = 0 },
+                0.0,
+                C.WHITE,
+            );
+            C.EndShaderMode();
+            C.EndTextureMode();
+        }
+
+        // Combine FBOs into final framebuffer
         C.DrawTexturePro(
-            self.white_fbo.texture,
+            self.black_fbo_rounded.texture,
             .{
                 .x = 0,
-                .y = @intToFloat(f32, self.white_fbo.texture.height),
-                .width = @intToFloat(f32, self.white_fbo.texture.width),
-                .height = -@intToFloat(f32, self.white_fbo.texture.height),
+                .y = @intToFloat(f32, self.black_fbo_rounded.texture.height),
+                .width = @intToFloat(f32, self.black_fbo_rounded.texture.width),
+                .height = -@intToFloat(f32, self.black_fbo_rounded.texture.height),
             },
             .{
                 .x = 0,
-                .y = 0,
+                .y = -1,
                 .width = g.screen_w,
-                .height = g.screen_h,
+                .height = g.screen_h - 1,
             },
             .{ .x = 0, .y = 0 },
             0.0,
-            C.WHITE,
+            self.white_color,
         );
         C.DrawTexturePro(
-            self.black_fbo.texture,
+            self.white_fbo_rounded.texture,
             .{
                 .x = 0,
-                .y = @intToFloat(f32, self.black_fbo.texture.height),
-                .width = @intToFloat(f32, self.black_fbo.texture.width),
-                .height = -@intToFloat(f32, self.black_fbo.texture.height),
+                .y = @intToFloat(f32, self.white_fbo_rounded.texture.height),
+                .width = @intToFloat(f32, self.white_fbo_rounded.texture.width),
+                .height = -@intToFloat(f32, self.white_fbo_rounded.texture.height),
             },
             .{
                 .x = 0,
-                .y = 0,
+                .y = -1,
                 .width = g.screen_w,
-                .height = g.screen_h,
+                .height = g.screen_h - 1,
             },
             .{ .x = 0, .y = 0 },
             0.0,
-            C.GREEN,
+            self.white_color,
         );
+
+        // Render our score squares to the score square fbo for blurring
 
         C.BeginMode2D(self.camera);
         // Render a square indicating what the mouse is hovering
@@ -178,6 +228,15 @@ pub const Renderer = struct {
             .{ .x = g.tile_size, .y = g.tile_size },
             .{ .r = 255, .g = 255, .b = 255, .a = 100 },
         );
+        // Draw score squares
+        for (board.score_squares.items) |ss| {
+            C.DrawRectangleLinesEx(.{
+                .x = board_tl.x + @intToFloat(f32, ss.x) * g.tile_size / 2,
+                .y = board_tl.y + @intToFloat(f32, ss.y) * g.tile_size / 2,
+                .width = g.tile_size,
+                .height = g.tile_size,
+            }, 1.0, C.RED);
+        }
         C.EndMode2D();
     }
 
@@ -191,10 +250,10 @@ pub fn main() !void {
     C.InitWindow(@floatToInt(c_int, g.screen_w), @floatToInt(c_int, g.screen_h), "window_me");
     defer C.CloseWindow();
 
-    var board = try Board.init(std.heap.c_allocator, 10, 10);
-    board.at(5, 5).* = Board.Tile.init(true, false, false, true);
+    var board = try Board.init(std.heap.c_allocator, 1024, 1024);
+    board.set(512, 512, Board.Tile.init(true, false, false, true));
 
-    const target_fps: f32 = 60.0;
+    const target_fps: f32 = 480.0;
     const dt: f32 = 1.0 / target_fps;
     C.SetTargetFPS(@floatToInt(c_int, target_fps));
 
@@ -206,8 +265,6 @@ pub fn main() !void {
     while (!C.WindowShouldClose()) {
         // Compute mouse position in world
         const mouse_screen = la.Vec2f.fromRaylib(C.GetMousePosition());
-        // TODO zoom when calculating mouse_world
-        //std.debug.assert(renderer.camera.zoom == 1.0);
         const mouse_world = mouse_screen.mul(1.0 / renderer.camera.zoom)
             .add(la.Vec2f.fromRaylib(renderer.camera.offset).mul(-1.0 / renderer.camera.zoom))
             .add(la.Vec2f.fromRaylib(renderer.camera.target));
@@ -218,17 +275,38 @@ pub fn main() !void {
         });
         mouse_tile_pos.x = std.math.clamp(mouse_tile_pos.x, 0.0, @intToFloat(f32, board.board_w - 1));
         mouse_tile_pos.y = std.math.clamp(mouse_tile_pos.y, 0.0, @intToFloat(f32, board.board_h - 1));
+        const mouse_tile_x: usize = @floatToInt(usize, mouse_tile_pos.x);
+        const mouse_tile_y: usize = @floatToInt(usize, mouse_tile_pos.y);
+        const hovered_tile = board.at(mouse_tile_x, mouse_tile_y);
 
-        if (C.IsMouseButtonPressed(C.MOUSE_BUTTON_LEFT)) {
-            board.at(
-                @floatToInt(usize, mouse_tile_pos.x),
-                @floatToInt(usize, mouse_tile_pos.y),
-            ).* = Board.Tile.init(
-                rand.random().boolean(),
-                rand.random().boolean(),
-                rand.random().boolean(),
-                rand.random().boolean(),
-            );
+        if (C.IsMouseButtonDown(C.MOUSE_BUTTON_LEFT)) {
+            if (!hovered_tile.present) {
+                board.set(
+                    mouse_tile_x,
+                    mouse_tile_y,
+                    Board.Tile.init(
+                        rand.random().boolean(),
+                        rand.random().boolean(),
+                        rand.random().boolean(),
+                        rand.random().boolean(),
+                    ),
+                );
+            }
+        }
+
+        if (hovered_tile.present) {
+            if (C.IsKeyPressed(C.KEY_E)) {
+                board.rotateClockwise(
+                    @floatToInt(usize, mouse_tile_pos.x),
+                    @floatToInt(usize, mouse_tile_pos.y),
+                );
+            }
+            if (C.IsKeyPressed(C.KEY_Q)) {
+                board.rotateAntiClockwise(
+                    @floatToInt(usize, mouse_tile_pos.x),
+                    @floatToInt(usize, mouse_tile_pos.y),
+                );
+            }
         }
 
         // Scroll camera?
@@ -246,9 +324,10 @@ pub fn main() !void {
 
         C.BeginDrawing();
         C.ClearBackground(C.BLACK);
-        renderer.render(&board, mouse_tile_pos);
-        const txt = try std.fmt.allocPrintZ(std.heap.c_allocator, "{d} {d}", .{ mouse_world.x, mouse_world.y });
-        C.DrawText(txt, 100, 10, 10, C.WHITE);
+        renderer.render(board, mouse_tile_pos);
+        const dbg_txt = try std.fmt.allocPrintZ(std.heap.c_allocator, "{d} {d}", .{ mouse_world.x, mouse_world.y });
+        defer std.heap.c_allocator.free(dbg_txt);
+        C.DrawText(dbg_txt, 100, 10, 10, C.WHITE);
 
         C.DrawFPS(10, 10);
         C.EndDrawing();
